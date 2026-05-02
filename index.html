@@ -64,29 +64,33 @@
       min-width: 70px;
     }
 
-    /* Throttle bar – right side */
-    #throttle-panel {
+    /* ── Right-side meter stack: BOOST + THROTTLE ─────── */
+    #meter-stack {
       position: absolute;
       top: 22px;
       right: 28px;
+      display: flex;
+      gap: 18px;
+    }
+
+    .meter {
       display: flex;
       flex-direction: column;
       align-items: center;
       gap: 6px;
     }
 
-    .throttle-label {
+    .meter-label {
       font-size: 10px;
       letter-spacing: 0.15em;
-      color: #00ffcc66;
       text-transform: uppercase;
+      transition: color 0.2s ease, text-shadow 0.2s ease;
     }
 
-    #throttle-track {
+    .meter-track {
       width: 18px;
-      height: 120px;
+      height: 140px;
       background: rgba(0, 12, 24, 0.55);
-      border: 1px solid #00ffcc44;
       border-radius: 4px;
       display: flex;
       align-items: flex-end;
@@ -94,12 +98,35 @@
       backdrop-filter: blur(4px);
     }
 
+    /* THROTTLE colours (cyan/green) */
+    #throttle-track  { border: 1px solid #00ffcc44; }
+    #throttle-label  { color: #00ffcc66; }
     #throttle-fill {
       width: 100%;
       height: 50%;
       background: linear-gradient(to top, #00ffcc, #00ff8866);
       transition: height 0.1s ease;
       box-shadow: 0 0 8px #00ffcc88;
+    }
+
+    /* BOOST colours (orange/yellow) */
+    #boost-track     { border: 1px solid #ff882244; }
+    #boost-label     { color: #ff882288; }
+    #boost-label.active {
+      color: #ffdd44;
+      text-shadow: 0 0 12px #ffaa22;
+      animation: boost-pulse 0.5s ease-in-out infinite alternate;
+    }
+    #boost-fill {
+      width: 100%;
+      height: 0%;
+      background: linear-gradient(to top, #ff5522, #ffdd44);
+      transition: height 0.05s linear;
+      box-shadow: 0 0 12px #ff882288;
+    }
+    @keyframes boost-pulse {
+      from { text-shadow: 0 0 6px  #ffaa22; }
+      to   { text-shadow: 0 0 18px #ffdd44, 0 0 4px #ffffff; }
     }
 
     /* Crosshair */
@@ -260,11 +287,19 @@
       </div>
     </div>
 
-    <!-- Throttle bar – right -->
-    <div id="throttle-panel">
-      <div class="throttle-label">THR</div>
-      <div id="throttle-track">
-        <div id="throttle-fill"></div>
+    <!-- Right-side meter stack: BOOST + THROTTLE -->
+    <div id="meter-stack">
+      <div class="meter">
+        <div class="meter-label" id="boost-label">Boost</div>
+        <div class="meter-track" id="boost-track">
+          <div id="boost-fill"></div>
+        </div>
+      </div>
+      <div class="meter">
+        <div class="meter-label" id="throttle-label">Thr</div>
+        <div class="meter-track" id="throttle-track">
+          <div id="throttle-fill"></div>
+        </div>
       </div>
     </div>
 
@@ -278,7 +313,7 @@
     </div>
 
     <!-- Input device label -->
-    <div id="input-label" id="hud-input">Initialising…</div>
+    <div id="input-label">Initialising…</div>
   </div>
 
   <!-- Loading screen -->
@@ -300,6 +335,8 @@
       altitude:   document.getElementById('hud-altitude'),
       heading:    document.getElementById('hud-heading'),
       throttle:   document.getElementById('throttle-fill'),
+      boost:      document.getElementById('boost-fill'),
+      boostLabel: document.getElementById('boost-label'),
       inputLabel: document.getElementById('input-label'),
     };
 
