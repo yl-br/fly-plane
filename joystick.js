@@ -8,7 +8,10 @@
  *   • ANY button on the stick being pressed counts
  *   • analog triggers reported as axes (4 / 5 / 6 / 7) past −0.3 count
  *   • the throttle scroller pushed past 0.9 also counts
- * This keeps things robust across the many different Logitech models.
+ *
+ * `fire` is dedicated to the gun trigger:
+ *   • button 0 on the gamepad (the primary/trigger button)
+ *   • KeyF on the keyboard
  *
  * Raw state is exposed on this.raw for the debug HUD to inspect.
  */
@@ -28,6 +31,7 @@ export class JoystickController {
       boost:    false,
       brake:    false,
       speed:    false,
+      fire:     false,
     };
 
     // Snapshot of every axis & button this frame  (for debug panel)
@@ -43,7 +47,7 @@ export class JoystickController {
   _bindKeyboard() {
     window.addEventListener('keydown', e => {
       this._keys[e.code] = true;
-      if (e.code === 'Space') e.preventDefault();
+      if (e.code === 'Space' || e.code === 'KeyF') e.preventDefault();
     });
     window.addEventListener('keyup', e => {
       this._keys[e.code] = false;
@@ -66,6 +70,7 @@ export class JoystickController {
     s.boost = !!this._keys['ShiftLeft'] || !!this._keys['ShiftRight'];
     s.brake = !!this._keys['ControlLeft'] || !!this._keys['ControlRight'];
     s.speed = !!this._keys['Space'];
+    s.fire  = !!this._keys['KeyF'];
 
     if (s.boost)      s.throttle = Math.min(1, s.throttle + 0.02);
     else if (s.brake) s.throttle = Math.max(0, s.throttle - 0.03);
@@ -123,6 +128,9 @@ export class JoystickController {
     s.boost = !!(btns[1]?.pressed) || !!(btns[3]?.pressed);
     s.brake = !!(btns[2]?.pressed) || !!(btns[4]?.pressed);
 
+    // ── Fire: dedicated to button 0 (the primary trigger) ──
+    s.fire = !!(btns[0]?.pressed) || (btns[0]?.value ?? 0) > 0.5;
+
     // ── Speed: ANY button currently held counts (defensive) ──
     let speedFromButton = false;
     for (let i = 0; i < btns.length; i++) {
@@ -161,8 +169,8 @@ export class JoystickController {
       const name = this.deviceName.length > 30
         ? this.deviceName.slice(0, 28) + '…'
         : this.deviceName;
-      return `🕹 ${name}  ·  ANY BUTTON or THROTTLE>90% = SPEED`;
+      return `🕹 ${name}  ·  TRIGGER = FIRE  ·  ANY BTN/THR>90% = SPEED`;
     }
-    return '⌨  W/S pitch · A/D roll · Q/E yaw · Shift throttle · ␣ SPACE = SPEED';
+    return '⌨  WASD/Arrows · Q/E yaw · Shift throttle · ␣ SPEED · F FIRE';
   }
 }

@@ -5,11 +5,19 @@
  *
  *  • Edge detection           justPressed / justReleased
  *  • Smoothed axes
- *  • Speed-force manager      ramps 0 → 1 while either:
- *                                – the speed button is held, OR
- *                                – the throttle scroller is past 0.85
- *                             decays back to 0 when neither is true
+ *  • Speed-force manager      ramps 0 → 1 driven by EITHER:
+ *                               – the speed button (any button on the stick),
+ *                               – the throttle scroller in its upper half
+ *                                 (0.5 → 1.0 maps to 0 → 1 force, smoothly).
+ *                             decays back to 0 when neither is engaging it.
+ *  • Throttle-rate events     emits 'throttleKick' on rapid upward flicks of
+ *                             the throttle so the camera/FOV can punch.
  *  • Live debug overlay       (toggle with ` / F1)
+ *
+ * Events emitted via on(name, fn):
+ *   'speedStart'                – speed button just pressed
+ *   'speedEnd'                  – speed button just released
+ *   'throttleKick' (delta)      – throttle just jumped up by > 0.08
  */
 
 export class JoystickHelper {
@@ -26,6 +34,10 @@ export class JoystickHelper {
     this.speedForce    = 0;
     this._rampUpRate   = 3.2;
     this._rampDownRate = 1.6;
+
+    // Throttle-delta state (for the throttleKick event)
+    this._prevThrottle      = 0;
+    this._throttleKickFloor = 0.08;   // emit when throttle jumps up by more than this in one frame
 
     this._listeners = {};
 
@@ -70,19 +82,34 @@ export class JoystickHelper {
   isSpeedActive()   { return !!this.controller.state.speed; }
   getSpeedForce()   { return this.speedForce; }
 
+  /** Last frame's throttle delta. Positive = pushing up. */
+  getThrottleDelta() { return this._lastThrottleDelta || 0; }
+
   /* ── Per-frame update ───────────────────────────────────── */
 
   update(dt) {
     const s = this.controller.state;
 
-    // Edge events
+    // ── Edge events ──
     if (this.justPressed('speed'))  this._emit('speedStart');
     if (this.justReleased('speed')) this._emit('speedEnd');
 
-    // Combine button-driven and throttle-driven targets so the throttle
-    // scroller above 0.85 also engages speed force proportionally.
+    // ── Throttle-rate detection ──
+    // Emit 'throttleKick' when the throttle jumps up sharply in one frame.
+    // Slow ramps (e.g. keyboard at +0.02 / frame) stay below threshold.
+    const throttleDelta = s.throttle - this._prevThrottle;
+    this._lastThrottleDelta = throttleDelta;
+    if (throttleDelta > this._throttleKickFloor) this._emit('throttleKick', throttleDelta);
+    this._prevThrottle = s.throttle;
+
+    // ── Speed force target ──
+    // The throttle's upper half is now a proportional boost slider:
+    //   throttle 0.5 → drive 0   (cruise — no force)
+    //   throttle 0.75 → drive 0.5
+    //   throttle 1.0 → drive 1   (full force)
+    // The speed button still hard-targets 1, so it overrides everything.
     const buttonTarget  = s.speed ? 1 : 0;
-    const throttleDrive = Math.max(0, (s.throttle - 0.85) / 0.15);  // 0 .. 1
+    const throttleDrive = Math.max(0, (s.throttle - 0.5) / 0.5);   // 0 .. 1 across upper half
     const target        = Math.max(buttonTarget, throttleDrive);
 
     const rate = target > this.speedForce ? this._rampUpRate : this._rampDownRate;
@@ -135,7 +162,7 @@ export class JoystickHelper {
     </div>`;
     html += `<div>Device: <b style="color:#fff">${ctrl.deviceName}</b></div>`;
     html += `<div>connected: <b style="color:${ctrl.connected ? '#0f0' : '#f55'}">${ctrl.connected}</b></div>`;
-    html += `<div style="margin-top:6px;color:#ff8822">force: ${this.speedForce.toFixed(2)} · speed: ${ctrl.state.speed} · throttle: ${ctrl.state.throttle.toFixed(2)}</div>`;
+    html += `<div style="margin-top:6px;color:#ff8822">force: ${this.speedForce.toFixed(2)} · speed: ${ctrl.state.speed} · throttle: ${ctrl.state.throttle.toFixed(2)} · Δ: ${(this._lastThrottleDelta || 0).toFixed(3)}</div>`;
 
     // Axes
     if (raw.axes.length) {
