@@ -32,6 +32,7 @@ import {
   ExplosionSystem,
   HUDController,
 } from './game-controllers.js';
+import { getOrCreatePilot, saveScore, loadScores } from './nickname.js';
 
 export class AirplaneGame {
   constructor(canvas, hud, joystick) {
@@ -44,6 +45,11 @@ export class AirplaneGame {
     this.crashTimer = 0;
     this.gameOver = false;
     this.clock    = new THREE.Clock();
+
+    // ── Pilot identity (random callsign, one per page-load) ──
+    this.pilot = getOrCreatePilot();
+    if (this.hud.pilot) this.hud.pilot.textContent = this.pilot.name;
+    console.log(`[Game] Pilot: ${this.pilot.name}`);
 
     // Wire restart button (defined in index.html). A full reload is
     // the simplest reliable reset — every system, particle, tile, and
@@ -218,10 +224,61 @@ export class AirplaneGame {
     this.gameOver = true;
     this.running  = false;
 
-    const overlay = document.getElementById('game-over');
-    const finalEl = document.getElementById('final-score');
-    if (finalEl && this.bullets) finalEl.textContent = String(this.bullets.score);
+    const overlay  = document.getElementById('game-over');
+    const finalEl  = document.getElementById('final-score');
+    const pilotEl  = document.getElementById('final-pilot');
+    const score    = this.bullets ? this.bullets.score : 0;
+
+    if (finalEl) finalEl.textContent = String(score);
+    if (pilotEl) pilotEl.textContent = this.pilot.name;
+
+    // Persist this run and render the leaderboard. Even a 0-score
+    // is saved — players like seeing every attempt land somewhere.
+    const { scores, rank } = saveScore(this.pilot.name, score);
+    this._renderLeaderboard(scores, rank);
+
     if (overlay) overlay.classList.add('visible');
-    console.log('[Game] Game over.');
+    console.log(`[Game] Game over. Score=${score}, rank=${rank}`);
+  }
+
+  /**
+   * Render the top-10 list into #leaderboard-list, highlighting the
+   * row that corresponds to this run (matched by reference position
+   * via `rank`, which is 1-indexed).
+   */
+  _renderLeaderboard(scores, currentRank) {
+    const list = document.getElementById('leaderboard-list');
+    const note = document.getElementById('leaderboard-note');
+    if (!list) return;
+
+    list.innerHTML = '';
+    if (!scores.length) {
+      const empty = document.createElement('li');
+      empty.className = 'lb-empty';
+      empty.textContent = 'No scores yet';
+      list.appendChild(empty);
+    } else {
+      scores.forEach((entry, i) => {
+        const li = document.createElement('li');
+        if (i + 1 === currentRank) li.className = 'you';
+        li.innerHTML =
+          `<span class="lb-name">${this._escapeHtml(entry.name)}</span>` +
+          `<span class="lb-score">${entry.score}</span>`;
+        list.appendChild(li);
+      });
+    }
+
+    if (note) {
+      if (currentRank === 1)         note.textContent = '★ New high score';
+      else if (currentRank)          note.textContent = `Your rank · #${currentRank}`;
+      else                           note.textContent = 'Didn\'t make the top 10';
+    }
+  }
+
+  /** Minimal HTML escape so random/future nicknames can't inject markup. */
+  _escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+    ));
   }
 }
