@@ -13,6 +13,10 @@
  * and bump the score; HUDController shows the score (auto-creating
  * the row if index.html didn't pre-declare one).
  *
+ * Background music (music.js) fades in on the first user gesture,
+ * tracks the helper's speedForce for intensity, and crossfades to a
+ * sparser minor outro on game-over. Press M to mute.
+ *
  * If you don't see "[Game] JoystickHelper attached" in the browser
  * console, you're running the wrong file. Replace whatever you have
  * with this one.
@@ -21,7 +25,7 @@
 import * as THREE         from 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.module.js';
 import { JoystickHelper } from './joystick-helper.js';
 
-import { buildAirplane, Terrain, Clouds, Balloons } from './game-board.js';
+import { buildAirplane, Terrain, Clouds, Balloons, Moon } from './game-board.js';
 import { CrashEffects } from './effects.js';
 import {
   FlightController,
@@ -34,6 +38,7 @@ import {
 } from './game-controllers.js';
 import { getOrCreatePilot, saveScore } from './nickname.js';
 import { Leaderboard } from './leaderboard.js';
+import { Music }       from './music.js';
 
 export class AirplaneGame {
   constructor(canvas, hud, joystick) {
@@ -45,6 +50,15 @@ export class AirplaneGame {
     this.crashing = false;
     this.crashTimer = 0;
     this.gameOver = false;
+
+    // Lunar-landing state — mirrors the crash sequence: contact starts
+    // a brief settling animation, then the mission-complete overlay
+    // appears. missionComplete latches so we don't fire the overlay
+    // twice if checkContact() returns 'landing' on consecutive frames.
+    this.landing         = false;
+    this.landingTimer    = 0;
+    this.missionComplete = false;
+
     this.clock    = new THREE.Clock();
 
     // ── Pilot identity (random callsign, one per page-load) ──
@@ -54,6 +68,13 @@ export class AirplaneGame {
 
     // Leaderboard view — DOM-only; storage lives in nickname.js.
     this.leaderboard = new Leaderboard();
+
+    // ── Background music ──
+    // Procedural, no asset files. Silent until the first user gesture
+    // (browser policy), then fades in. setIntensity() in the loop ties
+    // the mix to the helper's speedForce. Press M to mute.
+    this.music = new Music();
+    this.music.armOnFirstGesture();
 
     // Wire restart button (defined in index.html). A full reload is
     // the simplest reliable reset — every system, particle, tile, and
@@ -98,6 +119,7 @@ export class AirplaneGame {
     this.terrain  = new Terrain(this.scene);
     this.clouds   = new Clouds(this.scene);
     this.balloons = new Balloons(this.scene, this.plane.position);
+    this.moon     = new Moon(this.scene);
 
     // ── Controllers ──
     this.flight     = new FlightController(this.plane, this.helper);
@@ -171,6 +193,24 @@ export class AirplaneGame {
       return;
     }
 
+    // ── Lunar-landing sequence ──
+    // Mirror of the crash block, but for the success path: skip physics
+    // and gently lerp the plane onto the pad with a level orientation.
+    // When the timer expires we reveal the mission-complete overlay.
+    if (this.landing) {
+      this.landingTimer -= dt;
+      const target = this.moon.padTop.clone();
+      target.y += 1.5;                                  // sit just above the pad
+      this.plane.position.lerp(target, 0.15);
+      // Slerp toward identity so the plane settles level on the pad.
+      const level = new THREE.Quaternion();
+      this.plane.quaternion.slerp(level, 0.10);
+      this.moon.update(dt);
+      this.renderer.render(this.scene, this.camera);
+      if (this.landingTimer <= 0 && !this.missionComplete) this._showLandingComplete();
+      return;
+    }
+
     const input = this.joystick.update();
     this.helper.update(dt);
 
@@ -182,6 +222,20 @@ export class AirplaneGame {
     const p = this.plane.position;
     const groundY = this.terrain.getHeightAt(p.x, p.z);
     if (p.y < groundY + 1.5) {
+      this._triggerCrash();
+      return;
+    }
+
+    // 1c) Moon contact — landing on the pad triggers the mission-
+    // complete path; touching the moon body anywhere else is a normal
+    // crash. Landing zone takes priority over the sphere intersect
+    // so a clean top-down approach is always rewarded.
+    const moonContact = this.moon.checkContact(this.plane.position);
+    if (moonContact === 'landing') {
+      this._triggerLanding();
+      return;
+    }
+    if (moonContact === 'crash') {
       this._triggerCrash();
       return;
     }
@@ -199,6 +253,12 @@ export class AirplaneGame {
     this.explosions.update(dt);
     this.clouds.update(this.plane.position);
     this.terrain.update(this.plane.position);
+    this.moon.update(dt);
+
+    // 4b) Music intensity tracks the boost. speedForce already smooths
+    // 0..1 nicely; the music's own smoothing layer keeps mix fades
+    // from feeling abrupt on quick throttle jabs.
+    this.music.setIntensity(this.helper.getSpeedForce());
 
     // 5) HUD
     this.hudCtrl.update(input);
@@ -241,7 +301,67 @@ export class AirplaneGame {
     const { scores, rank } = saveScore(this.pilot.name, score);
     this.leaderboard.render(scores, rank);
 
+    // Crossfade music to the sparser minor outro under the overlay.
+    this.music.onGameOver();
+
     if (overlay) overlay.classList.add('visible');
     console.log(`[Game] Game over. Score=${score}, rank=${rank}`);
+  }
+
+  /**
+   * Begin the lunar-landing sequence: stop the plane's velocity so it
+   * doesn't drift off the pad, then let the loop's `landing` block
+   * settle it visually onto the pad before the overlay appears.
+   */
+  _triggerLanding() {
+    if (this.landing || this.crashing) return;
+    this.landing      = true;
+    this.landingTimer = 1.5;                      // seconds before overlay appears
+    this.flight.velocity.set(0, 0, 0);            // park the plane on the pad
+    console.log('[Game] Lunar contact — touchdown sequence started.');
+  }
+
+  /**
+   * Reveal the mission-complete overlay. Reuses the #game-over DOM
+   * with a .victory class that swaps the title/subtitle colors from
+   * red to gold — keeps the markup small at the cost of needing to
+   * reset the text content here.
+   *
+   * Scoring: base score + a flat lunar-landing bonus. Saving the
+   * total (rather than the base) means a successful landing actually
+   * climbs the leaderboard, which is the point.
+   */
+  _showLandingComplete() {
+    if (this.missionComplete) return;
+    this.missionComplete = true;
+    this.running         = false;
+
+    const baseScore = this.bullets ? this.bullets.score : 0;
+    const bonus     = 500;
+    const total     = baseScore + bonus;
+
+    const overlay = document.getElementById('game-over');
+    const titleEl = overlay ? overlay.querySelector('h1')   : null;
+    const subEl   = overlay ? overlay.querySelector('.sub') : null;
+    const finalEl = document.getElementById('final-score');
+    const pilotEl = document.getElementById('final-pilot');
+
+    if (overlay) overlay.classList.add('victory');
+    if (titleEl) titleEl.textContent = 'Lunar Landing';
+    if (subEl)   subEl.textContent   = `Touchdown · ${baseScore} + ${bonus} bonus`;
+    if (finalEl) finalEl.textContent = String(total);
+    if (pilotEl) pilotEl.textContent = this.pilot.name;
+
+    // Save the bonused total so a successful landing actually shows
+    // up at the top of the leaderboard.
+    const { scores, rank } = saveScore(this.pilot.name, total);
+    this.leaderboard.render(scores, rank);
+
+    // Reuse onGameOver()'s mix change — opens the filter for a clear
+    // track under the overlay. Same audio behavior, different mood.
+    this.music.onGameOver();
+
+    if (overlay) overlay.classList.add('visible');
+    console.log(`[Game] LUNAR LANDING. base=${baseScore} bonus=${bonus} total=${total} rank=${rank}`);
   }
 }

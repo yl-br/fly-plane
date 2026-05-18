@@ -302,6 +302,17 @@
       margin-top: -16px;
     }
 
+    /* Lunar-landing variant: gold title/subtitle instead of red.
+       game.js toggles .victory on the overlay element when the
+       mission-complete sequence fires. */
+    #game-over.victory h1 {
+      color: #ffdd44;
+      text-shadow: 0 0 30px #ffaa22cc, 0 0 60px #ffdd44aa;
+    }
+    #game-over.victory .sub {
+      color: #ffdd44aa;
+    }
+
     #go-stats {
       display: flex;
       align-items: center;

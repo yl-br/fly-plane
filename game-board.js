@@ -327,3 +327,186 @@ export class Balloons {
   /** Read-only view of the active balloons (for collision tests). */
   getActive() { return this.balloons; }
 }
+
+/* ═══════════════════════════════════════════════════════════
+   Moon
+   ────
+   Far-off landing destination. A big gray cratered sphere with
+   a glowing landing pad on top. Fixed in world-space (unlike
+   clouds/balloons, which stream around the player) so flying
+   toward it actually gets you closer — it functions as a real
+   navigable landmark.
+
+   Visibility: all moon materials have `fog: false`, so the
+   scene fog (which fully obscures things past ~900 units) does
+   not swallow the moon when you're far away. A tall vertical
+   beacon helps spot the landing pad from anywhere on the map.
+
+   Landing rules — see `checkContact()`:
+     • Plane within the pad cylinder near the pad surface
+         → 'landing'  (mission complete)
+     • Plane touching the moon body anywhere else
+         → 'crash'    (normal crash sequence)
+     • Otherwise → null
+═══════════════════════════════════════════════════════════ */
+export class Moon {
+  constructor(scene) {
+    this.scene = scene;
+
+    this.radius    = 150;
+    this.padRadius = 40;
+    this.padHeight = 4;
+
+    // Fixed location: high in the sky, ahead of the player's spawn,
+    // so they fly toward it. Altitude 300 forces a deliberate climb
+    // (terrain sits at y≈-80, plane cruises around y≈0–30).
+    this.position = new THREE.Vector3(0, 300, -1500);
+
+    this.group = new THREE.Group();
+    this.group.position.copy(this.position);
+
+    // ── Moon body — gray sphere with vertex-displaced surface ──
+    const moonMat = new THREE.MeshStandardMaterial({
+      color: 0xc0c0c8, roughness: 0.95, metalness: 0.05, fog: false,
+    });
+    const moonGeo = new THREE.SphereGeometry(this.radius, 48, 32);
+    const mp = moonGeo.attributes.position;
+    for (let i = 0; i < mp.count; i++) {
+      const x = mp.getX(i), y = mp.getY(i), z = mp.getZ(i);
+      // Layered noise so the surface looks pitted rather than smoothly bumpy.
+      const noise = Math.sin(x * 0.08) * Math.cos(y * 0.07) * 4
+                  + Math.sin(z * 0.11) * Math.cos(x * 0.05) * 2;
+      const r = Math.sqrt(x*x + y*y + z*z);
+      const s = (r + noise) / r;
+      mp.setXYZ(i, x * s, y * s, z * s);
+    }
+    moonGeo.computeVertexNormals();
+    this.group.add(new THREE.Mesh(moonGeo, moonMat));
+
+    // ── Crater patches — darker circles painted onto the surface ──
+    // Restrict phi to avoid covering the pad area at the top pole.
+    const craterMat = new THREE.MeshStandardMaterial({
+      color: 0x808088, roughness: 1, metalness: 0, fog: false,
+    });
+    for (let i = 0; i < 16; i++) {
+      const cr     = 6 + Math.random() * 18;
+      const crater = new THREE.Mesh(new THREE.CircleGeometry(cr, 14), craterMat);
+      const theta  = Math.random() * Math.PI * 2;
+      const phi    = 0.25 + Math.random() * (Math.PI - 0.5);
+      const surf   = new THREE.Vector3(
+        Math.sin(phi) * Math.cos(theta),
+        Math.cos(phi),
+        Math.sin(phi) * Math.sin(theta),
+      );
+      crater.position.copy(surf.multiplyScalar(this.radius + 0.3));
+      crater.lookAt(0, 0, 0);
+      crater.rotateY(Math.PI);   // face outward
+      this.group.add(crater);
+    }
+
+    // ── Landing pad — flat metal cylinder on top of the moon ──
+    const padMat = new THREE.MeshStandardMaterial({
+      color: 0x445566, roughness: 0.4, metalness: 0.5, fog: false,
+    });
+    const pad = new THREE.Mesh(
+      new THREE.CylinderGeometry(this.padRadius, this.padRadius * 1.05, this.padHeight, 36),
+      padMat,
+    );
+    pad.position.y = this.radius + this.padHeight / 2;
+    this.group.add(pad);
+
+    // ── Pad markings — bright yellow ring inside the pad surface ──
+    const rimMat = new THREE.MeshBasicMaterial({
+      color: 0xffdd44, transparent: true, opacity: 0.9,
+      side: THREE.DoubleSide, fog: false,
+    });
+    const padRim = new THREE.Mesh(
+      new THREE.RingGeometry(this.padRadius * 0.85, this.padRadius * 0.95, 48),
+      rimMat,
+    );
+    padRim.rotation.x = -Math.PI / 2;
+    padRim.position.y = this.radius + this.padHeight + 0.12;
+    this.group.add(padRim);
+
+    // ── Outer cyan glow ring around the pad (pulsing) ──
+    const glowMat = new THREE.MeshBasicMaterial({
+      color: 0x00ffcc, transparent: true, opacity: 0.6,
+      side: THREE.DoubleSide, fog: false,
+    });
+    const glow = new THREE.Mesh(
+      new THREE.RingGeometry(this.padRadius * 0.95, this.padRadius * 1.15, 48),
+      glowMat,
+    );
+    glow.rotation.x = -Math.PI / 2;
+    glow.position.y = this.radius + this.padHeight + 0.05;
+    this._glow = glow;
+    this.group.add(glow);
+
+    // ── Vertical beacon — tall glowing pillar so you can spot
+    //    the landing zone from anywhere on the map. ──
+    const beaconMat = new THREE.MeshBasicMaterial({
+      color: 0x00ffcc, transparent: true, opacity: 0.5, fog: false,
+    });
+    const beacon = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.8, 0.8, 120, 8),
+      beaconMat,
+    );
+    beacon.position.y = this.radius + this.padHeight + 60;
+    this._beacon = beacon;
+    this.group.add(beacon);
+
+    scene.add(this.group);
+
+    // World-space top of the pad — used both for landing-zone tests
+    // and for parking the plane on touchdown.
+    this.padTop = new THREE.Vector3(
+      this.position.x,
+      this.position.y + this.radius + this.padHeight,
+      this.position.z,
+    );
+
+    this._t = 0;
+  }
+
+  /** Pulse the glow ring + beacon for visibility. Call each frame. */
+  update(dt) {
+    this._t += dt;
+    const pulse = 0.5 + 0.5 * Math.sin(this._t * 2.2);
+    if (this._glow)   this._glow.material.opacity   = 0.35 + pulse * 0.35;
+    if (this._beacon) this._beacon.material.opacity = 0.25 + pulse * 0.30;
+  }
+
+  /**
+   * Tests the plane against the moon and the landing pad.
+   *
+   * Returns:
+   *   'landing' — plane is within the pad cylinder near the pad surface
+   *   'crash'   — plane is touching the moon body anywhere else
+   *    null     — no contact
+   *
+   * The landing band is generous in Y (a few units above and below the
+   * pad surface) so a normal descent gets caught even at frame rates
+   * where the plane moves several units per frame.
+   */
+  checkContact(planePos) {
+    const dx = planePos.x - this.position.x;
+    const dy = planePos.y - this.position.y;
+    const dz = planePos.z - this.position.z;
+
+    const horiz  = Math.sqrt(dx * dx + dz * dz);
+    const padTop = this.position.y + this.radius + this.padHeight;
+
+    // Landing zone first — overrides the crash test, so a clean
+    // top-down approach is always read as a landing even if the
+    // sphere-intersect test would also trigger.
+    if (horiz < this.padRadius && planePos.y < padTop + 5 && planePos.y > padTop - 3) {
+      return 'landing';
+    }
+
+    // Sphere intersection — touching the moon body anywhere else.
+    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (dist < this.radius + 3) return 'crash';
+
+    return null;
+  }
+}
