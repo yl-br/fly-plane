@@ -13,8 +13,8 @@
  *   • ExhaustSystem     – particle puffs from the engines + plane-glow pulsing.
  *   • StreakSystem      – speed-line streaks at high boost.
  *   • BulletSystem      – fires red bullets while input.fire is held.
- *                         Hit-tests against balloons; tracks score.
- *                         Calls onHit(balloon) when a bullet connects.
+ *                         Hit-tests against enemy aircraft; tracks score.
+ *                         Calls onHit(enemy) when a bullet connects.
  *   • ExplosionSystem   – particle burst at a position in a given color.
  *   • HUDController     – pushes values to the DOM HUD overlay.
  *                         Auto-creates a SCORE row if index.html doesn't have one.
@@ -350,9 +350,9 @@ export class StreakSystem {
    ────────────
    Fires twin red bullets from the engine pods while input.fire is
    held, on a fixed cooldown. Each frame: advances bullets, expires
-   old ones, hit-tests against balloons. Emits onHit(balloon) when a
-   bullet connects so the game can spawn an explosion + remove the
-   balloon. Tracks `score` (number of balloons popped).
+   old ones, hit-tests against enemy aircraft. Emits onHit(enemy)
+   when a bullet connects so the game can spawn an explosion +
+   remove the enemy. Tracks `score` (number of enemies downed).
 ═══════════════════════════════════════════════════════════ */
 export class BulletSystem {
   constructor(scene, plane) {
@@ -365,7 +365,7 @@ export class BulletSystem {
     this.bulletSpeed = 700;     // world units / sec
     this.bulletLife  = 2.0;     // seconds
     this.score      = 0;
-    this.onHit      = null;     // (balloon) => void
+    this.onHit      = null;     // (enemy) => void
 
     // Shared resources — one per system, never disposed
     this._geo  = new THREE.SphereGeometry(0.45, 6, 6);
@@ -400,14 +400,14 @@ export class BulletSystem {
     });
   }
 
-  update(dt, input, balloons) {
+  update(dt, input, enemies) {
     this.cooldown -= dt;
     if (input.fire && this.cooldown <= 0) {
       this._fire();
       this.cooldown = this.fireRate;
     }
 
-    const active = balloons ? balloons.getActive() : null;
+    const active = enemies ? enemies.getActive() : null;
 
     for (let i = this.bullets.length - 1; i >= 0; i--) {
       const b = this.bullets[i];
@@ -417,9 +417,9 @@ export class BulletSystem {
       // Hit-test
       let hit = null;
       if (active) {
-        for (const balloon of active) {
-          const d2 = b.position.distanceToSquared(balloon.group.position);
-          if (d2 < balloon.radius * balloon.radius) { hit = balloon; break; }
+        for (const enemy of active) {
+          const d2 = b.position.distanceToSquared(enemy.group.position);
+          if (d2 < enemy.radius * enemy.radius) { hit = enemy; break; }
         }
       }
 

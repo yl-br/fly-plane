@@ -1,7 +1,9 @@
 /**
  * joystick.js
- * Handles Logitech joystick input via the Gamepad API.
- * Falls back to keyboard if no joystick is connected.
+ * Handles gamepad input via the Gamepad API. Keyboard input is its
+ * own module now (keyboard.js) — game.js reads both each frame and
+ * merges them. This split fixes a bug where any gamepad registered
+ * with the OS, even an idle one, would shadow the keyboard.
  *
  * `speed` (the boost trigger that drives the airplane's speed-force
  * reactions in the game) is intentionally permissive:
@@ -11,7 +13,6 @@
  *
  * `fire` is dedicated to the gun trigger:
  *   • button 0 on the gamepad (the primary/trigger button)
- *   • KeyF on the keyboard
  *
  * Raw state is exposed on this.raw for the debug HUD to inspect.
  */
@@ -37,44 +38,7 @@ export class JoystickController {
     // Snapshot of every axis & button this frame  (for debug panel)
     this.raw = { axes: [], buttons: [] };
 
-    this._keys = {};
-    this._bindKeyboard();
     this._watchGamepad();
-  }
-
-  /* ─── Keyboard ─────────────────────────────────────────── */
-
-  _bindKeyboard() {
-    window.addEventListener('keydown', e => {
-      this._keys[e.code] = true;
-      if (e.code === 'Space' || e.code === 'KeyF') e.preventDefault();
-    });
-    window.addEventListener('keyup', e => {
-      this._keys[e.code] = false;
-    });
-  }
-
-  _keyAxis(neg, pos) {
-    return (this._keys[pos] ? 1 : 0) - (this._keys[neg] ? 1 : 0);
-  }
-
-  _readKeyboard() {
-    const s = this.state;
-
-    s.roll  = this._keyAxis('KeyA', 'KeyD') ||
-              this._keyAxis('ArrowLeft', 'ArrowRight');
-    s.pitch = this._keyAxis('KeyW', 'KeyS') ||
-              this._keyAxis('ArrowUp', 'ArrowDown');
-    s.yaw   = this._keyAxis('KeyQ', 'KeyE');
-
-    s.boost = !!this._keys['ShiftLeft'] || !!this._keys['ShiftRight'];
-    s.brake = !!this._keys['ControlLeft'] || !!this._keys['ControlRight'];
-    s.speed = !!this._keys['Space'];
-    s.fire  = !!this._keys['KeyF'];
-
-    if (s.boost)      s.throttle = Math.min(1, s.throttle + 0.02);
-    else if (s.brake) s.throttle = Math.max(0, s.throttle - 0.03);
-    else              s.throttle = Math.max(0.3, s.throttle);
   }
 
   /* ─── Gamepad ───────────────────────────────────────────── */
@@ -159,9 +123,28 @@ export class JoystickController {
   /* ─── Public API ────────────────────────────────────────── */
 
   update() {
-    if (this.connected && this.gamepad) this._readGamepad();
-    else                                 this._readKeyboard();
+    if (this.connected && this.gamepad) {
+      this._readGamepad();
+    } else {
+      // No gamepad — clear axes/buttons so any leftover values from a
+      // prior connection don't linger. Keyboard input is merged on top
+      // of this state in game.js, so we leave a clean slate for it.
+      this._clearState();
+    }
     return this.state;
+  }
+
+  _clearState() {
+    const s = this.state;
+    s.roll = 0;
+    s.pitch = 0;
+    s.yaw = 0;
+    s.boost = false;
+    s.brake = false;
+    s.speed = false;
+    s.fire = false;
+    // Throttle is owned by the keyboard merge when no pad is present,
+    // so leave it for game.js to overwrite.
   }
 
   getStatusLabel() {
@@ -169,8 +152,8 @@ export class JoystickController {
       const name = this.deviceName.length > 30
         ? this.deviceName.slice(0, 28) + '…'
         : this.deviceName;
-      return `🕹 ${name}  ·  TRIGGER = FIRE  ·  ANY BTN/THR>90% = SPEED`;
+      return `🕹 ${name}  ·  TRIGGER = FIRE  ·  KEYBOARD ALSO ACTIVE`;
     }
-    return '⌨  WASD/Arrows · Q/E yaw · Shift throttle · ␣ SPEED · F FIRE';
+    return '⌨  Arrows/WASD · Q/E yaw · Shift/Ctrl throttle · ␣ FIRE+SPEED · F FIRE';
   }
 }

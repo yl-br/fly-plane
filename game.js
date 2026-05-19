@@ -3,13 +3,13 @@
  *
  * Owns the renderer, scene, camera, JoystickHelper, and the controller
  * stack from game-controllers.js. The visual world pieces (airplane,
- * terrain, clouds, balloons) live in game-board.js.
+ * terrain, clouds, enemies) live in game-board.js.
  *
  * Wires helper events → camera FOV punches:
  *   speedStart    →  fov +12   (any button or throttle past max)
  *   throttleKick  →  fov + clamp(delta * 35, 4..15)   (rapid throttle push)
  *
- * Bullet → balloon hits trigger an explosion in the balloon's color
+ * Bullet → enemy hits trigger an explosion in the enemy's accent color
  * and bump the score; HUDController shows the score (auto-creating
  * the row if index.html didn't pre-declare one).
  *
@@ -24,8 +24,9 @@
 
 import * as THREE         from 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.module.js';
 import { JoystickHelper } from './joystick-helper.js';
+import { KeyboardController } from './keyboard.js';
 
-import { buildAirplane, Terrain, Clouds, Balloons, Moon } from './game-board.js';
+import { buildAirplane, Terrain, Clouds, Enemies, Moon } from './game-board.js';
 import { CrashEffects } from './effects.js';
 import {
   FlightController,
@@ -39,17 +40,27 @@ import {
 import { getOrCreatePilot, saveScore } from './nickname.js';
 import { Leaderboard } from './leaderboard.js';
 import { Music }       from './music.js';
+import { Mars }        from './mars.js';
 
 export class AirplaneGame {
   constructor(canvas, hud, joystick) {
     this.canvas   = canvas;
     this.hud      = hud;
     this.joystick = joystick;
+    // Standalone keyboard input — runs in parallel with the joystick,
+    // not as a fallback inside it, so it can never be shadowed by an
+    // idle gamepad that the OS happens to have registered.
+    this.keyboard = new KeyboardController();
     this.helper   = new JoystickHelper(joystick);
     this.running  = false;
     this.crashing = false;
     this.crashTimer = 0;
     this.gameOver = false;
+
+    // Mars-interstitial state. Latches so the 3-second cinematic only
+    // triggers once even though the crash block keeps running while
+    // it's on screen.
+    this.showingMars = false;
 
     // Lunar-landing state — mirrors the crash sequence: contact starts
     // a brief settling animation, then the mission-complete overlay
@@ -69,6 +80,10 @@ export class AirplaneGame {
     // Leaderboard view — DOM-only; storage lives in nickname.js.
     this.leaderboard = new Leaderboard();
 
+    // Mars interstitial — DOM overlay shown for 3 seconds after a
+    // crash, between the fireball and the game-over screen.
+    this.mars = new Mars();
+
     // ── Background music ──
     // Procedural, no asset files. Silent until the first user gesture
     // (browser policy), then fades in. setIntensity() in the loop ties
@@ -78,7 +93,7 @@ export class AirplaneGame {
 
     // Wire restart button (defined in index.html). A full reload is
     // the simplest reliable reset — every system, particle, tile, and
-    // balloon goes back to a known clean state.
+    // enemy goes back to a known clean state.
     const restartBtn = document.getElementById('restart-btn');
     if (restartBtn) restartBtn.addEventListener('click', () => window.location.reload());
 
@@ -118,7 +133,7 @@ export class AirplaneGame {
     this.scene.add(this.plane);
     this.terrain  = new Terrain(this.scene);
     this.clouds   = new Clouds(this.scene);
-    this.balloons = new Balloons(this.scene, this.plane.position);
+    this.enemies  = new Enemies(this.scene, this.plane.position);
     this.moon     = new Moon(this.scene);
 
     // ── Controllers ──
@@ -131,12 +146,12 @@ export class AirplaneGame {
     this.bullets    = new BulletSystem(this.scene, this.plane);
     this.hudCtrl    = new HUDController(this.hud, this.plane, this.helper, this.joystick, this.flight, this.bullets);
 
-    // Bullet hit → explosion in balloon's color + remove balloon
+    // Bullet hit → explosion in the enemy's accent color + remove enemy
     // (BulletSystem already incremented score before this fires.)
-    this.bullets.onHit = balloon => {
-      this.explosions.trigger(balloon.group.position, balloon.color);
-      this.balloons.remove(balloon, this.plane.position, this.plane.quaternion);
-      console.log(`[Game] hit! score=${this.bullets.score}`);
+    this.bullets.onHit = enemy => {
+      this.explosions.trigger(enemy.group.position, enemy.color);
+      this.enemies.remove(enemy, this.plane.position, this.plane.quaternion);
+      console.log(`[Game] enemy down! score=${this.bullets.score}`);
     };
 
     // ── Helper events → camera lens punches ──
@@ -168,6 +183,32 @@ export class AirplaneGame {
     this.camera.updateProjectionMatrix();
   }
 
+  /**
+   * Combine keyboard state into the joystick's state object in place.
+   *
+   *   Axes (roll/pitch/yaw)  – keyboard wins when actively pressed,
+   *                            otherwise the gamepad's analog value
+   *                            stays. Pressing a key always takes
+   *                            precedence over an idle stick.
+   *   Buttons                – OR; either source can fire/boost/etc.
+   *   Throttle               – the gamepad's scroller wins when a pad
+   *                            is connected (it's an absolute slider,
+   *                            not a ramp). With no pad the keyboard
+   *                            owns it.
+   */
+  _mergeKeyboardInto(targetState, kbState) {
+    if (kbState.roll  !== 0) targetState.roll  = kbState.roll;
+    if (kbState.pitch !== 0) targetState.pitch = kbState.pitch;
+    if (kbState.yaw   !== 0) targetState.yaw   = kbState.yaw;
+
+    targetState.boost = targetState.boost || kbState.boost;
+    targetState.brake = targetState.brake || kbState.brake;
+    targetState.speed = targetState.speed || kbState.speed;
+    targetState.fire  = targetState.fire  || kbState.fire;
+
+    if (!this.joystick.connected) targetState.throttle = kbState.throttle;
+  }
+
   _loop() {
     if (!this.running) return;
     requestAnimationFrame(() => this._loop());
@@ -189,7 +230,13 @@ export class AirplaneGame {
         this.camera.position.y += (Math.random() - 0.5) * shake;
       }
       this.renderer.render(this.scene, this.camera);
-      if (this.crashTimer <= 0 && !this.gameOver) this._showGameOver();
+      // Fireball finished → show the 3-second Mars cinematic, then the
+      // game-over overlay. `showingMars` latches so this only fires
+      // once even though we keep returning into this branch every
+      // frame while Mars is on screen.
+      if (this.crashTimer <= 0 && !this.showingMars && !this.gameOver) {
+        this._showMars();
+      }
       return;
     }
 
@@ -212,6 +259,12 @@ export class AirplaneGame {
     }
 
     const input = this.joystick.update();
+    this.keyboard.update();
+    // Overlay keyboard input onto the joystick's state. Helper, flight,
+    // HUD and bullets all read joystick.state (via the `input` ref),
+    // so writing the merge into that same object is the cheapest way
+    // to keep every downstream system unchanged.
+    this._mergeKeyboardInto(input, this.keyboard.state);
     this.helper.update(dt);
 
     // 1) Move the plane
@@ -240,11 +293,11 @@ export class AirplaneGame {
       return;
     }
 
-    // 2) Move the world & balloons (so collision tests are current)
-    this.balloons.update(dt, this.plane.position, this.plane.quaternion);
+    // 2) Move the world & enemies (so collision tests are current)
+    this.enemies.update(dt, this.plane.position, this.plane.quaternion);
 
-    // 3) Bullets fire / advance / hit-test against balloons
-    this.bullets.update(dt, input, this.balloons);
+    // 3) Bullets fire / advance / hit-test against enemies
+    this.bullets.update(dt, input, this.enemies);
 
     // 4) Effects
     this.cameraCtrl.update(input);
@@ -280,6 +333,20 @@ export class AirplaneGame {
     this.crashFx.trigger(this.plane.position);
     this.plane.visible = false;                   // it just blew up
     console.log('[Game] Ground impact — crash sequence started.');
+  }
+
+  /**
+   * Show the 3-second Mars cinematic, then chain into the game-over
+   * overlay. The main loop keeps running (still in the `crashing`
+   * branch, returning early each frame) underneath the overlay; the
+   * overlay's own z-index covers the now-static crash scene.
+   */
+  _showMars() {
+    if (this.showingMars) return;
+    this.showingMars = true;
+    this.mars.onComplete = () => this._showGameOver();
+    this.mars.show(3);
+    console.log('[Game] Crash → Mars interstitial (3s).');
   }
 
   /** Reveal the game-over overlay and stop the loop. */

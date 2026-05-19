@@ -8,8 +8,10 @@
  *   • buildAirplane()  – constructs the airplane mesh (a THREE.Group)
  *   • Terrain          – tile-streaming heightmap ground
  *   • Clouds           – drifting cloud field that follows the plane
- *   • Balloons         – colored hot-air balloons; the bullet-system targets
- *                        them. Streams in/out around the plane.
+ *   • Enemies          – hostile enemy aircraft that the bullet-system targets.
+ *                        Streams in/out around the plane. Each enemy flies
+ *                        in a fixed heading; the player flies through the
+ *                        formation and picks them off.
  */
 
 import * as THREE from 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.module.js';
@@ -204,63 +206,129 @@ export class Clouds {
 }
 
 /* ═══════════════════════════════════════════════════════════
-   Balloons
-   ─────────
-   Hot-air balloons in a palette of colors. Each balloon has a
-   collision radius so the BulletSystem can hit-test against it.
-   Balloons drift gently and bob up and down. When one falls more
-   than ~1500 units from the plane, it's recycled to a new spot
-   ahead of the plane so the world stays populated.
+   Enemies
+   ───────
+   Hostile enemy aircraft. Replaces the old hot-air balloons —
+   same external interface (getActive / remove / update, with
+   each item exposing `group`, `radius`, and `color`) so the
+   BulletSystem and ExplosionSystem keep working unchanged.
+
+   Each enemy is a small dark-gray fighter with a colored
+   accent stripe + engine glow (the accent is also what the
+   explosion uses on a hit). They fly in straight lines at a
+   fixed heading and speed; when one drifts more than ~1500
+   units from the plane, it's recycled to a new spot ahead.
+
+   Gameplay is identical to the old balloon setup: fly into
+   the formation, shoot them down.
 ═══════════════════════════════════════════════════════════ */
-export class Balloons {
+
+/** Build a single enemy-aircraft mesh tinted by `accentColor`. */
+function buildEnemyAircraft(accentColor) {
+  const group = new THREE.Group();
+
+  // Materials
+  const bodyMat   = new THREE.MeshStandardMaterial({ color: 0x2a2a32, roughness: 0.4, metalness: 0.65 });
+  const darkMat   = new THREE.MeshStandardMaterial({ color: 0x14141a, roughness: 0.5, metalness: 0.5 });
+  const accentMat = new THREE.MeshStandardMaterial({ color: accentColor, roughness: 0.3, metalness: 0.5 });
+  const eyeMat    = new THREE.MeshStandardMaterial({
+    color: 0xff2233, emissive: 0xaa0011, emissiveIntensity: 0.7, roughness: 0.2,
+  });
+  const glowMat   = new THREE.MeshBasicMaterial({
+    color: accentColor, transparent: true, opacity: 0.9,
+  });
+
+  // Fuselage — sleek tapered body. Wider at the front so the nose
+  // cone reads as menacing rather than dainty.
+  const fuse = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.4, 4.0, 10), bodyMat);
+  fuse.rotation.x = Math.PI / 2;
+  group.add(fuse);
+
+  // Sharp nose cone
+  const nose = new THREE.Mesh(new THREE.ConeGeometry(0.55, 1.4, 10), darkMat);
+  nose.rotation.x = -Math.PI / 2;
+  nose.position.set(0, 0, -2.7);
+  group.add(nose);
+
+  // Red glowing "eye" on the nose — the signature menacing element.
+  const eye = new THREE.Mesh(new THREE.SphereGeometry(0.22, 12, 8), eyeMat);
+  eye.position.set(0, 0.18, -2.0);
+  group.add(eye);
+
+  // Swept-back delta wings (triangular, no curve). Sharp shapes
+  // make them read as predatory next to the player's friendlier
+  // rounded wings.
+  function makeWing(side) {
+    const shape = new THREE.Shape();
+    shape.moveTo(0, 0);
+    shape.lineTo(side * 2.8, 2.2);
+    shape.lineTo(side * 0.5, 2.2);
+    shape.closePath();
+    const geo = new THREE.ExtrudeGeometry(shape, { depth: 0.10, bevelEnabled: false });
+    const m   = new THREE.Mesh(geo, bodyMat);
+    m.rotation.x = -Math.PI / 2;
+    m.position.set(0, -0.05, 0.4);
+    return m;
+  }
+  group.add(makeWing(1));
+  group.add(makeWing(-1));
+
+  // Accent stripes along each wing (matches the explosion color).
+  [-1, 1].forEach(s => {
+    const stripe = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.05, 0.25), accentMat);
+    stripe.position.set(s * 1.2, 0.01, 1.1);
+    group.add(stripe);
+  });
+
+  // Wing-tip glow lights (additive-feeling via basic material)
+  [-1, 1].forEach(s => {
+    const tip = new THREE.Mesh(new THREE.SphereGeometry(0.12, 8, 6), glowMat);
+    tip.position.set(s * 2.7, 0.02, 2.0);
+    group.add(tip);
+  });
+
+  // Vertical tail fin + accent
+  const fin = new THREE.Mesh(new THREE.BoxGeometry(0.08, 1.0, 1.1), bodyMat);
+  fin.position.set(0, 0.55, 1.7);
+  group.add(fin);
+  const finStripe = new THREE.Mesh(new THREE.BoxGeometry(0.10, 0.4, 0.45), accentMat);
+  finStripe.position.set(0, 0.85, 1.5);
+  group.add(finStripe);
+
+  // Engine exhaust glow at the back
+  const exhaust = new THREE.Mesh(new THREE.CircleGeometry(0.34, 14), glowMat);
+  exhaust.rotation.y = Math.PI;
+  exhaust.position.set(0, 0, 2.05);
+  group.add(exhaust);
+
+  // Scale to roughly match the player's plane silhouette so they
+  // read as peers in the air.
+  group.scale.setScalar(1.4);
+  return group;
+}
+
+export class Enemies {
   constructor(scene, planePosition) {
     this.scene  = scene;
+    // Accent palette for the squadron — also used as the explosion
+    // color when one is shot down. Same palette as the old balloon
+    // colors so the explosion variety is preserved.
     this.colors = [0xff3333, 0x33cc44, 0x3388ff, 0xffcc22, 0xcc44ff, 0xff8822, 0x22ddcc];
 
-    // Shared geometries — never disposed (page reload cleans up)
-    this._geo = {
-      body:   new THREE.SphereGeometry(8, 14, 12),
-      basket: new THREE.BoxGeometry(3, 2, 3),
-      rope:   new THREE.CylinderGeometry(0.06, 0.06, 6, 4),
-    };
-
-    // Shared materials. One body material per color.
-    this._bodyMats = this.colors.map(c => new THREE.MeshStandardMaterial({
-      color: c, roughness: 0.45, metalness: 0.05,
-    }));
-    this._basketMat = new THREE.MeshStandardMaterial({ color: 0x8b5a2b, roughness: 0.9 });
-    this._ropeMat   = new THREE.MeshBasicMaterial({ color: 0x222222 });
-
-    this.balloons    = [];
+    this.enemies     = [];
     this.targetCount = 28;
     this.recycleDist = 1500;
 
-    // Initial spawn — 360° around the plane so the player has things
-    // in every direction at game start.
+    // Initial spawn — 360° around the plane so the player has
+    // contacts in every direction at game start.
     for (let i = 0; i < this.targetCount; i++) {
       this._spawn(planePosition, null, /* initial */ true);
     }
   }
 
   _spawn(planePos, planeQuat, initial = false) {
-    const colorIdx = Math.floor(Math.random() * this.colors.length);
-
-    const group = new THREE.Group();
-
-    const body = new THREE.Mesh(this._geo.body, this._bodyMats[colorIdx]);
-    body.scale.y = 1.25;                      // teardrop-ish
-    body.position.y = 0;
-    group.add(body);
-
-    const basket = new THREE.Mesh(this._geo.basket, this._basketMat);
-    basket.position.y = -12;
-    group.add(basket);
-
-    [-1, 1].forEach(sx => [-1, 1].forEach(sz => {
-      const rope = new THREE.Mesh(this._geo.rope, this._ropeMat);
-      rope.position.set(sx * 1.4, -7, sz * 1.4);
-      group.add(rope);
-    }));
+    const color = this.colors[Math.floor(Math.random() * this.colors.length)];
+    const group = buildEnemyAircraft(color);
 
     // Position. Initial = anywhere within radius. Recycle = ahead of
     // the plane in a forward cone so the player flies into them.
@@ -280,52 +348,68 @@ export class Balloons {
       planePos.z + Math.cos(angle) * dist,
     );
 
+    // Heading: random direction in the XZ plane. The mesh's nose
+    // points at local -Z, so rotation.y = heading orients the plane
+    // to face that direction (heading=0 → facing -Z).
+    const heading = Math.random() * Math.PI * 2;
+    group.rotation.y = heading;
+    // A subtle constant bank in a random direction so they don't all
+    // look perfectly level — adds visual texture from the cockpit.
+    group.rotation.z = (Math.random() - 0.5) * 0.25;
+
     this.scene.add(group);
 
-    this.balloons.push({
+    this.enemies.push({
       group,
-      color:    this.colors[colorIdx],
-      radius:   13,                                  // collision radius (forgiving)
-      drift:    new THREE.Vector3((Math.random() - 0.5) * 1.2, 0, (Math.random() - 0.5) * 1.2),
+      color,
+      radius:   8,                                    // collision radius (forgiving)
+      heading,
+      speed:    10 + Math.random() * 10,              // 10–20 units/sec
       bobPhase: Math.random() * Math.PI * 2,
-      bobAmp:   0.5 + Math.random() * 0.8,
+      bobAmp:   0.3 + Math.random() * 0.6,
     });
   }
 
-  /** Remove a balloon (called by the bullet system on hit) and respawn one ahead. */
-  remove(balloon, planePos, planeQuat) {
-    this.scene.remove(balloon.group);
-    // Geometries and materials are shared — don't dispose them.
-    const idx = this.balloons.indexOf(balloon);
-    if (idx >= 0) this.balloons.splice(idx, 1);
+  /** Remove an enemy (called by the bullet system on hit) and respawn one ahead. */
+  remove(enemy, planePos, planeQuat) {
+    this.scene.remove(enemy.group);
+    // Each enemy owns its meshes' materials (per-color tinting),
+    // but they're shared inside one mesh tree — Three.js will GC
+    // them when the group is removed and dereferenced. We don't
+    // explicitly dispose because the materials are cheap and the
+    // page reload on restart cleans everything up anyway.
+    const idx = this.enemies.indexOf(enemy);
+    if (idx >= 0) this.enemies.splice(idx, 1);
     this._spawn(planePos, planeQuat);
   }
 
   update(dt, planePos, planeQuat) {
-    // Drift + bob
-    for (const b of this.balloons) {
-      b.bobPhase += dt * 0.6;
-      b.group.position.x += b.drift.x * dt;
-      b.group.position.y += Math.sin(b.bobPhase) * b.bobAmp * dt;
-      b.group.position.z += b.drift.z * dt;
+    // Fly forward along each enemy's heading + gentle altitude bob.
+    for (const e of this.enemies) {
+      const dx = -Math.sin(e.heading) * e.speed * dt;
+      const dz = -Math.cos(e.heading) * e.speed * dt;
+      e.group.position.x += dx;
+      e.group.position.z += dz;
+      e.bobPhase += dt * 0.6;
+      e.group.position.y += Math.sin(e.bobPhase) * e.bobAmp * dt;
     }
 
-    // Recycle far-away balloons
+    // Recycle far-away enemies — same logic as the old balloon stream.
     const r2 = this.recycleDist * this.recycleDist;
-    for (let i = this.balloons.length - 1; i >= 0; i--) {
-      const b = this.balloons[i];
-      const dx = b.group.position.x - planePos.x;
-      const dz = b.group.position.z - planePos.z;
+    for (let i = this.enemies.length - 1; i >= 0; i--) {
+      const e = this.enemies[i];
+      const dx = e.group.position.x - planePos.x;
+      const dz = e.group.position.z - planePos.z;
       if (dx * dx + dz * dz > r2) {
-        this.scene.remove(b.group);
-        this.balloons.splice(i, 1);
+        this.scene.remove(e.group);
+        this.enemies.splice(i, 1);
         this._spawn(planePos, planeQuat);
       }
     }
   }
 
-  /** Read-only view of the active balloons (for collision tests). */
-  getActive() { return this.balloons; }
+  /** Read-only view of the active enemies (for collision tests). */
+  getActive() { return this.enemies; }
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -333,7 +417,7 @@ export class Balloons {
    ────
    Far-off landing destination. A big gray cratered sphere with
    a glowing landing pad on top. Fixed in world-space (unlike
-   clouds/balloons, which stream around the player) so flying
+   clouds/enemies, which stream around the player) so flying
    toward it actually gets you closer — it functions as a real
    navigable landmark.
 
